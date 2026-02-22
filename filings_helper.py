@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+import hashlib
 from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -59,6 +60,11 @@ class CompleteFiling(BaseModel):
     accession: str
     filing_date: str
     primary_doc: str
+
+    @property
+    def hash(self) -> str:
+        # Use ticker, doc_type, filing_date and accession as a unique identifier for the filing
+        return hashlib.sha256(f"{self.ticker}-{self.doc_type}-{self.filing_date}-{self.accession}".encode()).hexdigest()
 
     @classmethod
     def from_filing_and_doc(
@@ -174,6 +180,7 @@ class SECFilingsClient:
                 Optional[str], StringConstraints(strip_whitespace=True, to_upper=True)
             ] = None,
             limit: Optional[PositiveInt] = None,
+            start_date: Optional[str] = None,
             include_associated_docs: bool = False,
     ) -> List[Filing]:
         """Fetch filings for a ticker.
@@ -216,6 +223,9 @@ class SECFilingsClient:
                 if target_form and f.upper() != target_form:
                     continue
 
+                if start_date and d < start_date:
+                    continue
+
                 docs: tuple[AssociatedDoc, ...] = ()
                 if include_associated_docs and cik is not None:
                     docs = tuple(self.associated_docs(ticker, cik, a, p))
@@ -252,12 +262,13 @@ _CLIENT = SECFilingsClient()
 
 
 def get_complete_filings(
-        ticker: str, doc_type: Literal["8-K", "10-K"]
+        ticker: str, doc_type: Literal["8-K", "10-K"], scope: Literal["all", "recent"] = "all", start_date: Optional[str] = None
 ) -> List[CompleteFiling]:
-    filings = _CLIENT.get_filings(ticker, scope="all", form=doc_type, include_associated_docs=True)
+    filings = _CLIENT.get_filings(ticker, scope=scope, form=doc_type, include_associated_docs=True, start_date=start_date)
     return [CompleteFiling.from_filing_and_doc(filing, doc) for filing in filings
             if (doc := next((candidate for candidate in filing.associated_docs
                              if candidate.description == COMPLETE_SUBMISSION_DESCRIPTION), None)) is not None]
+
 
 def get_filing_content(filing: CompleteFiling) -> str:
     return _CLIENT.download_doc_text(filing.ticker, filing.accession, filing.primary_doc)

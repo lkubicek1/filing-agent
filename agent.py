@@ -119,24 +119,21 @@ filings: list[CompleteFiling] = []
 start_date = "2022-01-01"
 
 pbar = tqdm(TICKERS, desc=f"Starting to fetch {FILING_TYPE} filings...")
-for ticker in TICKERS:
-    pbar.set_description(f"Fetching {FILING_TYPE} filings for {ticker} (total_running: {len(filings)})...")
+pbar.set_postfix(collected_filings=0, failed_tickers=0)
+failed_tickers: list[str] = []
+for ticker in pbar:
+    pbar.set_description(f"Fetching {FILING_TYPE} filings for <{ticker}> since {start_date} ")
     try:
-        all_filings = [filing for filing in get_complete_filings(ticker, FILING_TYPE) if
-                       filing.filing_date < start_date]
+        filings.extend(get_complete_filings(ticker=ticker, doc_type=FILING_TYPE, start_date=start_date))
     except Exception as exc:
         LOGGER.error("Failed to fetch filings for %s: %s", ticker, exc)
+        failed_tickers.append(ticker)
         continue
-    filings.extend(filing for filing in all_filings if filing.filing_date >= start_date)
+    pbar.set_postfix(collected_filings=len(filings), failed_tickers=len(failed_tickers))
 
 LOGGER.info("Fetched %s filings", len(filings))
 
 results_jsonl_path = os.getenv("RESULTS_JSONL_PATH", "filing_analysis_results.jsonl")
-
-
-def filing_key(filing: CompleteFiling) -> tuple[object, ...]:
-    filing_data = filing.model_dump()
-    return tuple(filing_data[field_name] for field_name in CompleteFiling.model_fields)
 
 
 def load_persisted_results(path: str) -> list[FilingAnalysis]:
@@ -160,15 +157,14 @@ def load_persisted_results(path: str) -> list[FilingAnalysis]:
 
 
 persisted_results = load_persisted_results(results_jsonl_path)
-processed_filing_keys = {filing_key(result.filing) for result in persisted_results}
+processed_filing_keys = {result.filing.hash for result in persisted_results}
 
 pending_filings: list[CompleteFiling] = []
 seen_filing_keys = set(processed_filing_keys)
 for filing in filings:
-    key = filing_key(filing)
-    if key in seen_filing_keys:
+    if filing.hash in seen_filing_keys:
         continue
-    seen_filing_keys.add(key)
+    seen_filing_keys.add(filing.hash)
     pending_filings.append(filing)
 
 LOGGER.info(
