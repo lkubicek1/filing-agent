@@ -26,6 +26,7 @@ LOGGER = logging.getLogger(__name__)
 class AssociatedDoc(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    ticker: str
     name: str
     description: str
     doc_type: str
@@ -36,6 +37,7 @@ class AssociatedDoc(BaseModel):
 class Filing(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    ticker: str
     form: str
     accession: str
     filing_date: str
@@ -46,6 +48,7 @@ class Filing(BaseModel):
 class CompleteFiling(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    ticker: str
     name: str
     description: str
     doc_type: str
@@ -99,6 +102,7 @@ class SECFilingsClient:
 
     def associated_docs(
             self,
+            ticker: str,
             cik: int,
             accession: str,
             primary_doc: str,
@@ -132,6 +136,7 @@ class SECFilingsClient:
             size_text = cols[4].get_text(strip=True)
             docs.append(
                 AssociatedDoc(
+                    ticker=ticker,
                     name=name,
                     description=cols[1].get_text(" ", strip=True),
                     doc_type=cols[3].get_text(strip=True),
@@ -213,10 +218,11 @@ class SECFilingsClient:
 
                 docs: tuple[AssociatedDoc, ...] = ()
                 if include_associated_docs and cik is not None:
-                    docs = tuple(self.associated_docs(cik, a, p))
+                    docs = tuple(self.associated_docs(ticker, cik, a, p))
 
                 filings.append(
                     Filing(
+                        ticker=ticker,
                         form=f,
                         accession=a,
                         filing_date=d,
@@ -252,6 +258,9 @@ def get_complete_filings(
     return [CompleteFiling.from_filing_and_doc(filing, doc) for filing in filings
             if (doc := next((candidate for candidate in filing.associated_docs
                              if candidate.description == COMPLETE_SUBMISSION_DESCRIPTION), None)) is not None]
+
+def get_filing_content(filing: CompleteFiling) -> str:
+    return _CLIENT.download_doc_text(filing.ticker, filing.accession, filing.primary_doc)
 
 
 def main() -> int:

@@ -5,3 +5,6 @@ markdownify
 pydantic
 pydantic-ai
 python-dotenv
+llama-index
+llama-index-embeddings-openai
+tqdm
