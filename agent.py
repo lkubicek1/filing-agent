@@ -23,7 +23,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 
-
 class TopicCheck(BaseModel):
     # tri-state is often more reliable than forcing a hard boolean
     verdict: Literal["yes", "no", "unclear"] = Field(
@@ -81,14 +80,20 @@ INSTRUCTION_TEMPLATE = (
 model_name = os.getenv("MODEL_NAME", "gpt-5.2")
 embeddings_model_name = os.getenv("EMBEDDINGS_MODEL_NAME", "text-embedding-3-small")
 model = OpenAIChatModel(model_name=model_name, provider=OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY")))
-agent = Agent(model=model, output_type=TopicCheck, instructions=INSTRUCTION_TEMPLATE)
+agent = Agent(model=model, output_type=TopicCheck, instructions=INSTRUCTION_TEMPLATE, retries=5)
 
 embed_model = OpenAIEmbedding(model=embeddings_model_name, api_key=os.getenv("OPENAI_API_KEY"))
 splitter = SemanticSplitterNodeParser(embed_model=embed_model, buffer_size=1)
 
-TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA"]
-FILING_TYPE: Literal["8-K", "10-K"] = "10-K"
-LOGGER.info("Initialized with tickers: %s", TICKERS)
+# Mag7
+# TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA"]
+
+# Read tickers from oex.txt:
+with open("oex.txt", "r") as f:
+    TICKERS = f.read().splitlines()
+
+FILING_TYPE: Literal["8-K", "10-K"] = "8-K"
+LOGGER.info("Initialized with %s tickers...", len(TICKERS))
 
 
 def topic_is_discussed(text_chunk: str, topic: str) -> tuple[TopicCheck, RunUsage]:
@@ -102,8 +107,12 @@ def topic_is_discussed(text_chunk: str, topic: str) -> tuple[TopicCheck, RunUsag
 
 filings: list[CompleteFiling] = []
 
+# Ignore filings before 2022-01-01
+start_date = "2022-01-01"
+
 for ticker in tqdm(TICKERS, desc=f"Fetching {FILING_TYPE} filings"):
-    filings.extend(get_complete_filings(ticker, "10-K"))
+    all_filings = get_complete_filings(ticker, FILING_TYPE)
+    filings.extend(filing for filing in all_filings if filing.filing_date >= start_date)
 
 LOGGER.info("Fetched %s filings", len(filings))
 
@@ -118,12 +127,20 @@ def get_description(i: int, total: int, usage: Usage) -> str:
 
 
 encoder = tiktoken.get_encoding("cl100k_base")
-max_tokens = 8191
+max_tokens = 4096
+
+split = False
+class Node(BaseModel):
+    text: str
 
 for filing in pbar:
-    tokens = encoder.encode(get_filing_content(filing))
-    docs = [Document(text=encoder.decode(tokens[i:i + max_tokens])) for i in range(0, len(tokens), max_tokens)]
-    nodes = splitter.get_nodes_from_documents(docs)
+    if split:
+        tokens = encoder.encode(get_filing_content(filing))
+        capped_token_chunks = [tokens[i:i + max_tokens] for i in range(0, len(tokens), max_tokens)]
+        docs = [Document(text=encoder.decode(chunk)) for chunk in capped_token_chunks]
+        nodes = splitter.get_nodes_from_documents(docs)
+    else:
+        nodes = [Node(text=get_filing_content(filing))]
     for i, node in enumerate(nodes):
         pbar.set_description(get_description(i, len(nodes), overall_usage))
         check, usage = topic_is_discussed(node.text, "AI")
@@ -133,7 +150,7 @@ for filing in pbar:
         if check.verdict == "yes":
             results.append(FilingAnalysis(filing=filing, verdict=True, positive_topic_check=check))
             break
-    results.append(FilingAnalysis(filing=filing, verdict=False))
+        results.append(FilingAnalysis(filing=filing, verdict=False))
 
 LOGGER.info("Done! Overall usage report: %s", overall_usage)
 
