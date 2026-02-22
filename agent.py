@@ -24,6 +24,18 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 
+def format_tokens(n: int) -> str:
+    if n < 100_000:
+        return f"{n:,}"
+    elif n < 1_000_000:
+        return f"{round(n / 1_000)}K"
+    else:
+        # Show one decimal only if needed
+        value = n / 1_000_000
+        if value.is_integer():
+            return f"{int(value)}M"
+        return f"{value:.1f}M"
+
 
 class TopicCheck(BaseModel):
     # tri-state is often more reliable than forcing a hard boolean
@@ -199,7 +211,7 @@ class Node(BaseModel):
 
 pbar = tqdm(pending_filings, desc="Starting token estimation ...")
 estimated_input_tokens = 0
-pbar.set_postfix(estimated_input_tokens=estimated_input_tokens)
+pbar.set_postfix(estimated_input_tokens=format_tokens(estimated_input_tokens))
 filings_with_content: list[tuple[CompleteFiling, str]] = []
 for filing in pbar:
     pbar.set_description(f"Fetching content for {filing.ticker}...")
@@ -207,7 +219,7 @@ for filing in pbar:
     filings_with_content.append((filing, filing_content))
     tokens = encoder.encode(filing_content)
     estimated_input_tokens += len(tokens)
-    pbar.set_postfix(estimated_input_tokens=estimated_input_tokens)
+    pbar.set_postfix(estimated_input_tokens=format_tokens(estimated_input_tokens))
 
 # The agent will scan each filing for mentions of the following topic
 TOPIC_TO_CHECK = "AI"
