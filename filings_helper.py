@@ -1,8 +1,8 @@
 import argparse
 import json
+import logging
 import os
 import time
-import logging
 from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -20,6 +20,7 @@ from pydantic import (
 
 SEC_DELAY = float(os.getenv("SEC_DELAY", "0.1"))  # keep this small but non-zero
 COMPLETE_SUBMISSION_DESCRIPTION = "Complete submission text file"
+LOGGER = logging.getLogger(__name__)
 
 
 class AssociatedDoc(BaseModel):
@@ -244,7 +245,9 @@ class SECFilingsClient:
 _CLIENT = SECFilingsClient()
 
 
-def get_complete_filings(ticker: str, doc_type: Literal["8-K", "10-K"]) -> List[CompleteFiling]:
+def get_complete_filings(
+        ticker: str, doc_type: Literal["8-K", "10-K"]
+) -> List[CompleteFiling]:
     filings = _CLIENT.get_filings(ticker, scope="all", form=doc_type, include_associated_docs=True)
     return [CompleteFiling.from_filing_and_doc(filing, doc) for filing in filings
             if (doc := next((candidate for candidate in filing.associated_docs
@@ -252,6 +255,8 @@ def get_complete_filings(ticker: str, doc_type: Literal["8-K", "10-K"]) -> List[
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
     parser = argparse.ArgumentParser(
         description="Fetch SEC recent filings and latest filing content for a ticker"
     )
@@ -275,7 +280,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.limit < 1:
-        logging.error("--limit must be >= 1")
+        LOGGER.error("--limit must be >= 1")
         return 2
 
     try:
@@ -286,14 +291,14 @@ def main() -> int:
                 )
             except ValueError:
                 if args.filing_type:
-                    logging.error(f"No filings found for type {args.filing_type}")
+                    LOGGER.error("No filings found for type %s", args.filing_type)
                 else:
-                    logging.error("No filings found")
+                    LOGGER.error("No filings found")
                 return 1
 
-            logging.info("Filing counts by type:")
-            logging.info(json.dumps(counts_dict, indent=2))
-            logging.info(f"Total filings: {sum(counts_dict.values())}")
+            LOGGER.info("Filing counts by type:")
+            LOGGER.info(json.dumps(counts_dict, indent=2))
+            LOGGER.info("Total filings: %s", sum(counts_dict.values()))
             return 0
 
         filings = _CLIENT.get_filings(
@@ -307,7 +312,7 @@ def main() -> int:
             msg = "No recent filings found"
             if args.filing_type:
                 msg = f"No recent filings found for type {args.filing_type}"
-            logging.info(msg)
+            LOGGER.info(msg)
             return 1
 
         latest = filings[0]
@@ -317,7 +322,7 @@ def main() -> int:
             latest.primary_doc,
         )
     except Exception as exc:
-        logging.error(f"{exc}")
+        LOGGER.error("%s", exc)
         return 1
 
     latest_title = (
@@ -326,10 +331,10 @@ def main() -> int:
         f"accession={latest.accession}, primary_doc={latest.primary_doc}):"
     )
 
-    logging.info("Filings:")
-    logging.info(json.dumps([filing.model_dump() for filing in filings], indent=2))
-    logging.info(latest_title)
-    logging.info(latest_content)
+    LOGGER.info("Filings:")
+    LOGGER.info(json.dumps([filing.model_dump() for filing in filings], indent=2))
+    LOGGER.info(latest_title)
+    LOGGER.info(latest_content)
     return 0
 
 
