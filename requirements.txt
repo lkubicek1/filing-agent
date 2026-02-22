@@ -3,3 +3,5 @@ beautifulsoup4
 lxml
 markdownify
 pydantic
+pydantic-ai
+python-dotenv
