@@ -5,23 +5,20 @@ import sys
 import time
 from collections import Counter
 from functools import cached_property
-from itertools import chain, islice
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional
+from itertools import islice
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import httpx
 from markdownify import markdownify as md
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    PositiveInt,
+    StringConstraints,
+    validate_call,
+)
 
 SEC_DELAY = float(os.getenv("SEC_DELAY", "0.1"))  # keep this small but non-zero
-
-
-def _sec_get(url: str) -> httpx.Response:
-    time.sleep(SEC_DELAY)
-    headers = {
-        "User-Agent": os.environ.get("SEC_USER_AGENT", "Example example@example.com"),
-        "Accept-Encoding": "gzip, deflate",
-    }
-    return httpx.get(url, headers=headers, timeout=30).raise_for_status()
 
 
 class Filing(BaseModel):
@@ -33,40 +30,19 @@ class Filing(BaseModel):
     primary_doc: str
 
 
-class FilingsQuery(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    scope: Literal["recent", "all"] = "recent"
-    form: Optional[str] = None
-    limit: Optional[int] = None
-
-    @classmethod
-    def from_params(
-            cls,
-            *,
-            scope: str,
-            form: Optional[str],
-            limit: Optional[int],
-    ) -> "FilingsQuery":
-        if scope not in {"recent", "all"}:
-            raise ValueError("scope must be 'recent' or 'all'")
-        if limit is not None and limit < 1:
-            raise ValueError("limit must be >= 1")
-
-        form_upper: Optional[str] = None
-        if form is not None:
-            value = form.strip()
-            form_upper = value.upper() if value else None
-
-        return cls(scope=scope, form=form_upper, limit=limit)
-
-
 class SECFilingsClient:
-    def __init__(self, fetch: Callable[[str], httpx.Response] = _sec_get) -> None:
-        self._fetch = fetch
+
+    @staticmethod
+    def _sec_get(url: str) -> httpx.Response:
+        time.sleep(SEC_DELAY)
+        headers = {
+            "User-Agent": os.environ.get("SEC_USER_AGENT", "Example example@example.com"),
+            "Accept-Encoding": "gzip, deflate",
+        }
+        return httpx.get(url, headers=headers, timeout=30).raise_for_status()
 
     def _get_json(self, url: str) -> Dict[str, Any]:
-        return self._fetch(url).json()
+        return self._sec_get(url).json()
 
     @cached_property
     def ticker_to_cik(self) -> Dict[str, int]:
@@ -83,99 +59,79 @@ class SECFilingsClient:
         cik = str(self.resolve_cik(ticker)).zfill(10)
         return self._get_json(f"https://data.sec.gov/submissions/CIK{cik}.json")
 
-    def iter_filing_pages(
-            self,
-            submissions: Dict[str, Any],
-            *,
-            scope: Literal["recent", "all"],
-    ) -> Iterator[Dict[str, Any]]:
-        yield submissions["filings"]["recent"]
-        if scope == "recent":
-            return
-
-        files = (submissions.get("filings", {}) or {}).get("files", [])
-        for meta in files:
-            name = meta.get("name")
-            if name:
-                yield self._get_json(f"https://data.sec.gov/submissions/{name}")
-
-    @staticmethod
-    def iter_filing_rows(
-            page: Dict[str, Any],
-            *,
-            form_upper: Optional[str],
-    ) -> Iterator[Filing]:
-        for filing_form, accession, filing_date, primary_doc in zip(
-                page["form"],
-                page["accessionNumber"],
-                page["filingDate"],
-                page["primaryDocument"],
-        ):
-            if form_upper is not None and filing_form.upper() != form_upper:
-                continue
-
-            yield Filing(
-                form=filing_form,
-                accession=accession,
-                filing_date=filing_date,
-                primary_doc=primary_doc,
-            )
-
-    def iter_filings(
-            self, ticker_or_cik: str, *, query: FilingsQuery
-    ) -> Iterator[Filing]:
-        submissions = self.submissions(ticker_or_cik)
-        rows = chain.from_iterable(
-            self.iter_filing_rows(page, form_upper=query.form)
-            for page in self.iter_filing_pages(submissions, scope=query.scope)
-        )
-        if query.limit is None:
-            return rows
-        return islice(rows, query.limit)
-
     def download_doc_text(
             self,
-            ticker_or_cik: str,
+            ticker: str,
             accession: str,
             primary_doc: str,
     ) -> str:
-        cik = self.resolve_cik(ticker_or_cik)
+        cik = self.resolve_cik(ticker)
         url = (
             f"https://www.sec.gov/Archives/edgar/data/{cik}/"
             f"{accession.replace('-', '')}/{primary_doc}"
         )
-        return md(self._fetch(url).text)
+        return md(self._sec_get(url).text)
 
-    def get_filings(self,
-                    ticker: str,
-                    *,
-                    scope: str = "recent",
-                    form: Optional[str] = None,
-                    limit: Optional[int] = None,
-                    ) -> List[Dict[str, str]]:
+    @validate_call
+    def get_filings(
+            self,
+            ticker: str,
+            *,
+            scope: Literal["recent", "all"] = "recent",
+            form: Annotated[
+                Optional[str], StringConstraints(strip_whitespace=True, to_upper=True)
+            ] = None,
+            limit: Optional[PositiveInt] = None,
+    ) -> List[Filing]:
         """Fetch filings for a ticker.
 
         Args:
-            ticker: Ticker symbol or numeric CIK.
+            ticker: Ticker symbol.
             scope: "recent" (default) for inline recent filings only, or "all" for
                 recent + older pages referenced in `filings.files`.
             form: Optional form filter (case-insensitive).
             limit: Optional maximum number of results to return.
 
         Returns:
-            List of filing dicts with keys: form, accession, filing_date, primary_doc.
+            List of strongly-typed `Filing` models.
         """
-        query = FilingsQuery.from_params(scope=scope, form=form, limit=limit)
-        filings = _CLIENT.iter_filings(ticker, query=query)
-        return [filing.model_dump() for filing in filings]
+        submissions = self.submissions(ticker)
 
-    def filings_count_by_form(self, ticker: str, form: Optional[str] = None) -> Dict[str, int]:
+        def pages():
+            yield submissions["filings"]["recent"]
+            if scope == "recent": return
+            base = "https://data.sec.gov/submissions"
+            yield from (
+                self._get_json(f"{base}/{name}")
+                for m in submissions.get("filings", {}).get("files", ())
+                if (name := m.get("name"))
+            )
+
+        target_form = form.upper() if form else None
+
+        rows = (
+            Filing(form=f, accession=a, filing_date=d, primary_doc=p)
+            for page in pages()
+            for f, a, d, p in zip(
+            page.get("form", ()),
+            page.get("accessionNumber", ()),
+            page.get("filingDate", ()),
+            page.get("primaryDocument", ()),
+        )
+            if not target_form or f.upper() == target_form
+        )
+
+        return list(islice(rows, limit)) if limit is not None else list(rows)
+
+    def filings_count_by_form(
+            self, ticker: str, form: Optional[str] = None
+    ) -> Dict[str, int]:
         """Return counts grouped by form for a ticker (optionally filtered by form)."""
         filings = self.get_filings(ticker, scope="all", form=form)
         if form is not None and not filings:
             raise ValueError(f"no filings found for type {form}")
 
-        counts: Counter[str] = Counter(f["form"] for f in filings)
+        counts: Counter[str] = Counter(f.form for f in filings)
         return dict(sorted(counts.items(), key=lambda x: (-x[1], x[0])))
 
 
@@ -184,9 +140,9 @@ _CLIENT = SECFilingsClient()
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fetch SEC recent filings and latest filing content for a ticker or CIK"
+        description="Fetch SEC recent filings and latest filing content for a ticker"
     )
-    parser.add_argument("ticker", help="Ticker symbol or numeric CIK")
+    parser.add_argument("ticker", help="Ticker symbol")
     parser.add_argument(
         "--type",
         dest="filing_type",
@@ -212,7 +168,9 @@ def main() -> int:
     try:
         if args.counts:
             try:
-                counts_dict = _CLIENT.filings_count_by_form(args.ticker, form=args.filing_type)
+                counts_dict = _CLIENT.filings_count_by_form(
+                    args.ticker, form=args.filing_type
+                )
             except ValueError:
                 if args.filing_type:
                     print(
@@ -244,8 +202,8 @@ def main() -> int:
         latest = filings[0]
         latest_content = _CLIENT.download_doc_text(
             args.ticker,
-            latest["accession"],
-            latest["primary_doc"],
+            latest.accession,
+            latest.primary_doc,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -253,12 +211,12 @@ def main() -> int:
 
     latest_title = (
         "\nLatest filing content "
-        f"(form={latest['form']}, filing_date={latest['filing_date']}, "
-        f"accession={latest['accession']}, primary_doc={latest['primary_doc']}):"
+        f"(form={latest.form}, filing_date={latest.filing_date}, "
+        f"accession={latest.accession}, primary_doc={latest.primary_doc}):"
     )
 
     print("Filings:")
-    print(json.dumps(filings, indent=2))
+    print(json.dumps([filing.model_dump() for filing in filings], indent=2))
     print(latest_title)
     print(latest_content)
     return 0
