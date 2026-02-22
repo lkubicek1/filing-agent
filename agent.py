@@ -177,8 +177,6 @@ LOGGER.info(
 overall_usage = Usage(input_tokens=0, output_tokens=0)
 results: list[FilingAnalysis] = list(persisted_results)
 
-pbar = tqdm(pending_filings, desc="Starting analysis...")
-
 
 def get_description(i: int, total: int, usage: Usage) -> str:
     return f"{i + 1}/{total} ({usage.input_tokens} input tokens, {usage.output_tokens} output tokens)"
@@ -199,16 +197,29 @@ class Node(BaseModel):
     text: str
 
 
+pbar = tqdm(pending_filings, desc="Starting token estimation ...")
+estimated_input_tokens = 0
+pbar.set_postfix(estimated_input_tokens=estimated_input_tokens)
+filings_with_content: list[tuple[CompleteFiling, str]] = []
 for filing in pbar:
+    pbar.set_description(f"Fetching content for {filing.ticker}...")
+    filing_content = get_filing_content(filing)
+    filings_with_content.append((filing, filing_content))
+    tokens = encoder.encode(filing_content)
+    estimated_input_tokens += len(tokens)
+    pbar.set_postfix(estimated_input_tokens=estimated_input_tokens)
+
+pbar = tqdm(filings_with_content, desc="Starting analysis...")
+for filing, content in pbar:
     if split:
-        tokens = encoder.encode(get_filing_content(filing))
+        tokens = encoder.encode(content)
         capped_token_chunks = [
             tokens[i: i + max_tokens] for i in range(0, len(tokens), max_tokens)
         ]
         docs = [Document(text=encoder.decode(chunk)) for chunk in capped_token_chunks]
         nodes = splitter.get_nodes_from_documents(docs)
     else:
-        nodes = [Node(text=get_filing_content(filing))]
+        nodes = [Node(text=content)]
     for i, node in enumerate(nodes):
         pbar.set_description(get_description(i, len(nodes), overall_usage))
         node_text = node.text if isinstance(node, Node) else node.get_content()
