@@ -23,6 +23,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 
+
 class TopicCheck(BaseModel):
     # tri-state is often more reliable than forcing a hard boolean
     verdict: Literal["yes", "no", "unclear"] = Field(
@@ -30,7 +31,7 @@ class TopicCheck(BaseModel):
     )
     evidence: list[str] = Field(
         default_factory=list,
-        description="1–3 short quotes (verbatim) from the text supporting the verdict."
+        description="1–3 short quotes (verbatim) from the text supporting the verdict.",
     )
     reasoning: str = Field(
         description="One sentence explaining the verdict, referencing the evidence."
@@ -51,12 +52,14 @@ class FlattenedFilingAnalysis(CompleteFiling):
     @classmethod
     def from_analysis(cls, analysis: FilingAnalysis) -> "FlattenedFilingAnalysis":
         topic_check = analysis.positive_topic_check
-        return cls.model_validate({
-            **analysis.filing.model_dump(),
-            "verdict": 1 if analysis.verdict else 0,
-            "evidence": " | ".join(topic_check.evidence) if topic_check else "",
-            "reasoning": topic_check.reasoning if topic_check else ""
-        })
+        return cls.model_validate(
+            {
+                **analysis.filing.model_dump(),
+                "verdict": 1 if analysis.verdict else 0,
+                "evidence": " | ".join(topic_check.evidence) if topic_check else "",
+                "reasoning": topic_check.reasoning if topic_check else "",
+            }
+        )
 
 
 class Usage(BaseModel):
@@ -79,10 +82,16 @@ INSTRUCTION_TEMPLATE = (
 
 model_name = os.getenv("MODEL_NAME", "gpt-5.2")
 embeddings_model_name = os.getenv("EMBEDDINGS_MODEL_NAME", "text-embedding-3-small")
-model = OpenAIChatModel(model_name=model_name, provider=OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY")))
-agent = Agent(model=model, output_type=TopicCheck, instructions=INSTRUCTION_TEMPLATE, retries=5)
+model = OpenAIChatModel(
+    model_name=model_name, provider=OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY"))
+)
+agent = Agent(
+    model=model, output_type=TopicCheck, instructions=INSTRUCTION_TEMPLATE, retries=5
+)
 
-embed_model = OpenAIEmbedding(model=embeddings_model_name, api_key=os.getenv("OPENAI_API_KEY"))
+embed_model = OpenAIEmbedding(
+    model=embeddings_model_name, api_key=os.getenv("OPENAI_API_KEY")
+)
 splitter = SemanticSplitterNodeParser(embed_model=embed_model, buffer_size=1)
 
 # Mag7
@@ -97,10 +106,7 @@ LOGGER.info("Initialized with %s tickers...", len(TICKERS))
 
 
 def topic_is_discussed(text_chunk: str, topic: str) -> tuple[TopicCheck, RunUsage]:
-    prompt = (
-        f"TOPIC:\n{topic}\n\n"
-        f"TEXT CHUNK:\n{text_chunk}\n"
-    )
+    prompt = f"TOPIC:\n{topic}\n\nTEXT CHUNK:\n{text_chunk}\n"
     result = agent.run_sync(prompt)
     return result.output, result.usage()
 
@@ -116,52 +122,124 @@ for ticker in tqdm(TICKERS, desc=f"Fetching {FILING_TYPE} filings"):
 
 LOGGER.info("Fetched %s filings", len(filings))
 
-overall_usage = Usage(input_tokens=0, output_tokens=0)
-results: list[FilingAnalysis] = []
+results_jsonl_path = os.getenv("RESULTS_JSONL_PATH", "filing_analysis_results.jsonl")
 
-pbar = tqdm(filings, desc="Starting analysis...")
+
+def filing_key(filing: CompleteFiling) -> tuple[object, ...]:
+    filing_data = filing.model_dump()
+    return tuple(filing_data[field_name] for field_name in CompleteFiling.model_fields)
+
+
+def load_persisted_results(path: str) -> list[FilingAnalysis]:
+    if not os.path.exists(path):
+        return []
+
+    persisted_results: list[FilingAnalysis] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            payload = line.strip()
+            if not payload:
+                continue
+            try:
+                persisted_results.append(FilingAnalysis.model_validate_json(payload))
+            except Exception as exc:
+                LOGGER.warning(
+                    "Skipping invalid line %s in %s: %s", line_number, path, exc
+                )
+
+    return persisted_results
+
+
+persisted_results = load_persisted_results(results_jsonl_path)
+processed_filing_keys = {filing_key(result.filing) for result in persisted_results}
+
+pending_filings: list[CompleteFiling] = []
+seen_filing_keys = set(processed_filing_keys)
+for filing in filings:
+    key = filing_key(filing)
+    if key in seen_filing_keys:
+        continue
+    seen_filing_keys.add(key)
+    pending_filings.append(filing)
+
+LOGGER.info(
+    "Loaded %s persisted results from %s; skipping %s filings",
+    len(persisted_results),
+    results_jsonl_path,
+    len(filings) - len(pending_filings),
+)
+
+overall_usage = Usage(input_tokens=0, output_tokens=0)
+results: list[FilingAnalysis] = list(persisted_results)
+
+pbar = tqdm(pending_filings, desc="Starting analysis...")
 
 
 def get_description(i: int, total: int, usage: Usage) -> str:
     return f"{i + 1}/{total} ({usage.input_tokens} input tokens, {usage.output_tokens} output tokens)"
 
 
+def persist_result(result: FilingAnalysis) -> None:
+    with open(results_jsonl_path, "a", encoding="utf-8") as f:
+        f.write(result.model_dump_json())
+        f.write("\n")
+
+
 encoder = tiktoken.get_encoding("cl100k_base")
 max_tokens = 4096
 
 split = False
+
+
 class Node(BaseModel):
     text: str
+
 
 for filing in pbar:
     if split:
         tokens = encoder.encode(get_filing_content(filing))
-        capped_token_chunks = [tokens[i:i + max_tokens] for i in range(0, len(tokens), max_tokens)]
+        capped_token_chunks = [
+            tokens[i: i + max_tokens] for i in range(0, len(tokens), max_tokens)
+        ]
         docs = [Document(text=encoder.decode(chunk)) for chunk in capped_token_chunks]
         nodes = splitter.get_nodes_from_documents(docs)
     else:
         nodes = [Node(text=get_filing_content(filing))]
     for i, node in enumerate(nodes):
         pbar.set_description(get_description(i, len(nodes), overall_usage))
-        check, usage = topic_is_discussed(node.text, "AI")
+        node_text = node.text if isinstance(node, Node) else node.get_content()
+        check, usage = topic_is_discussed(node_text, "AI")
         overall_usage.input_tokens += usage.input_tokens
         overall_usage.output_tokens += usage.output_tokens
         pbar.set_description(get_description(i, len(nodes), overall_usage))
         if check.verdict == "yes":
-            results.append(FilingAnalysis(filing=filing, verdict=True, positive_topic_check=check))
+            analysis = FilingAnalysis(
+                filing=filing, verdict=True, positive_topic_check=check
+            )
+            results.append(analysis)
+            persist_result(analysis)
             break
-        results.append(FilingAnalysis(filing=filing, verdict=False))
+        analysis = FilingAnalysis(filing=filing, verdict=False)
+        results.append(analysis)
+        persist_result(analysis)
 
 LOGGER.info("Done! Overall usage report: %s", overall_usage)
+LOGGER.info("Saved incremental results to %s", results_jsonl_path)
 
 results_csv_path = os.getenv("RESULTS_CSV_PATH", "filing_analysis_results.csv")
 filing_fields = list(CompleteFiling.model_fields.keys())
 
-flattened_results = [FlattenedFilingAnalysis.from_analysis(result).model_dump() for result in results]
+flattened_results = [
+    FlattenedFilingAnalysis.from_analysis(result).model_dump() for result in results
+]
 
-(pd.DataFrame(flattened_results)
- .drop_duplicates(subset=filing_fields, keep="first")
- .reindex(columns=[*filing_fields, "verdict", "evidence", "reasoning"])
- .to_csv(results_csv_path, index=False))
+(
+    pd.DataFrame(flattened_results)
+    .drop_duplicates(subset=filing_fields, keep="first")
+    .reindex(columns=[*filing_fields, "verdict", "evidence", "reasoning"])
+    .to_csv(results_csv_path, index=False)
+)
 
-LOGGER.info("Saved %s flattened results to %s", len(flattened_results), results_csv_path)
+LOGGER.info(
+    "Saved %s flattened results to %s", len(flattened_results), results_csv_path
+)
