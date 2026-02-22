@@ -209,8 +209,13 @@ for filing in pbar:
     estimated_input_tokens += len(tokens)
     pbar.set_postfix(estimated_input_tokens=estimated_input_tokens)
 
-pbar = tqdm(filings_with_content, desc="Starting analysis...")
+# The agent will scan each filing for mentions of the following topic
+TOPIC_TO_CHECK = "AI"
+
+pbar = tqdm(filings_with_content, desc="Starting agent analysis...")
+pbar.set_postfix(total_input_tokens=overall_usage.input_tokens, total_output_tokens=overall_usage.output_tokens)
 for filing, content in pbar:
+    pbar.set_description(f"Agent is analyzing [{filing.ticker}:{filing.doc_type} {filing.filing_date}]")
     if split:
         tokens = encoder.encode(content)
         capped_token_chunks = [
@@ -221,9 +226,9 @@ for filing, content in pbar:
     else:
         nodes = [Node(text=content)]
     for i, node in enumerate(nodes):
-        pbar.set_description(get_description(i, len(nodes), overall_usage))
+        pbar.set_postfix(node=f"{i+1}/{len(nodes)}", total_input_tokens=overall_usage.input_tokens, total_output_tokens=overall_usage.output_tokens)
         node_text = node.text if isinstance(node, Node) else node.get_content()
-        check, usage = topic_is_discussed(node_text, "AI")
+        check, usage = topic_is_discussed(node_text, TOPIC_TO_CHECK)
         overall_usage.input_tokens += usage.input_tokens
         overall_usage.output_tokens += usage.output_tokens
         pbar.set_description(get_description(i, len(nodes), overall_usage))
