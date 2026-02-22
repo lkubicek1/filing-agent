@@ -8,3 +8,4 @@ python-dotenv
 llama-index
 llama-index-embeddings-openai
 tqdm
+pandas

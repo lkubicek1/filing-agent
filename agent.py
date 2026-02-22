@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Literal, Optional
 
+import pandas as pd
 from dotenv import load_dotenv
 from llama_index.core import Document
 from llama_index.core.node_parser import SemanticSplitterNodeParser
@@ -40,6 +41,22 @@ class FilingAnalysis(BaseModel):
     filing: CompleteFiling
     verdict: bool
     positive_topic_check: Optional[TopicCheck] = None
+
+
+class FlattenedFilingAnalysis(CompleteFiling):
+    verdict: Literal[0, 1]
+    evidence: str = ""
+    reasoning: str = ""
+
+    @classmethod
+    def from_analysis(cls, analysis: FilingAnalysis) -> "FlattenedFilingAnalysis":
+        topic_check = analysis.positive_topic_check
+        return cls.model_validate({
+            **analysis.filing.model_dump(),
+            "verdict": 1 if analysis.verdict else 0,
+            "evidence": " | ".join(topic_check.evidence) if topic_check else "",
+            "reasoning": topic_check.reasoning if topic_check else ""
+        })
 
 
 class Usage(BaseModel):
@@ -114,3 +131,15 @@ for filing in pbar:
     results.append(FilingAnalysis(filing=filing, verdict=False))
 
 LOGGER.info("Done! Overall usage report: %s", overall_usage)
+
+results_csv_path = os.getenv("RESULTS_CSV_PATH", "filing_analysis_results.csv")
+filing_fields = list(CompleteFiling.model_fields.keys())
+
+flattened_results = [FlattenedFilingAnalysis.from_analysis(result).model_dump() for result in results]
+
+(pd.DataFrame(flattened_results)
+ .drop_duplicates(subset=filing_fields, keep="first")
+ .reindex(columns=[*filing_fields, "verdict", "evidence", "reasoning"])
+ .to_csv(results_csv_path, index=False))
+
+LOGGER.info("Saved %s flattened results to %s", len(flattened_results), results_csv_path)
