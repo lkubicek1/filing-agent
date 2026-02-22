@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 from typing import Literal, Optional
 
 import pandas as pd
@@ -100,6 +101,7 @@ splitter = SemanticSplitterNodeParser(embed_model=embed_model, buffer_size=1)
 # Read tickers from oex.txt:
 with open("oex.txt", "r") as f:
     TICKERS = f.read().splitlines()
+random.shuffle(TICKERS)
 
 FILING_TYPE: Literal["8-K", "10-K"] = "8-K"
 LOGGER.info("Initialized with %s tickers...", len(TICKERS))
@@ -116,8 +118,15 @@ filings: list[CompleteFiling] = []
 # Ignore filings before 2022-01-01
 start_date = "2022-01-01"
 
-for ticker in tqdm(TICKERS, desc=f"Fetching {FILING_TYPE} filings"):
-    all_filings = get_complete_filings(ticker, FILING_TYPE)
+pbar = tqdm(TICKERS, desc=f"Starting to fetch {FILING_TYPE} filings...")
+for ticker in TICKERS:
+    pbar.set_description(f"Fetching {FILING_TYPE} filings for {ticker} (total_running: {len(filings)})...")
+    try:
+        all_filings = [filing for filing in get_complete_filings(ticker, FILING_TYPE) if
+                       filing.filing_date < start_date]
+    except Exception as exc:
+        LOGGER.error("Failed to fetch filings for %s: %s", ticker, exc)
+        continue
     filings.extend(filing for filing in all_filings if filing.filing_date >= start_date)
 
 LOGGER.info("Fetched %s filings", len(filings))
