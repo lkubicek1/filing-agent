@@ -5,10 +5,10 @@ import sys
 import time
 from collections import Counter
 from functools import cached_property
-from itertools import islice
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import httpx
+from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from pydantic import (
     BaseModel,
@@ -21,8 +21,33 @@ from pydantic import (
 SEC_DELAY = float(os.getenv("SEC_DELAY", "0.1"))  # keep this small but non-zero
 
 
+class AssociatedDoc(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    description: str
+    doc_type: str
+    size: Optional[int] = None
+    url: str
+
+
 class Filing(BaseModel):
     model_config = ConfigDict(frozen=True)
+
+    form: str
+    accession: str
+    filing_date: str
+    primary_doc: str
+    associated_docs: tuple[AssociatedDoc, ...] = ()
+
+class CompleteFiling(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    description: str
+    doc_type: str
+    size: Optional[int] = None
+    url: str
 
     form: str
     accession: str
@@ -31,12 +56,13 @@ class Filing(BaseModel):
 
 
 class SECFilingsClient:
-
     @staticmethod
     def _sec_get(url: str) -> httpx.Response:
         time.sleep(SEC_DELAY)
         headers = {
-            "User-Agent": os.environ.get("SEC_USER_AGENT", "Example example@example.com"),
+            "User-Agent": os.environ.get(
+                "SEC_USER_AGENT", "Example example@example.com"
+            ),
             "Accept-Encoding": "gzip, deflate",
         }
         return httpx.get(url, headers=headers, timeout=30).raise_for_status()
@@ -59,11 +85,60 @@ class SECFilingsClient:
         cik = str(self.resolve_cik(ticker)).zfill(10)
         return self._get_json(f"https://data.sec.gov/submissions/CIK{cik}.json")
 
+    def associated_docs(
+        self,
+        cik: int,
+        accession: str,
+        primary_doc: str,
+    ) -> List[AssociatedDoc]:
+        accession_no_dashes = accession.replace("-", "")
+        index_url = (
+            f"https://www.sec.gov/Archives/edgar/data/{cik}/"
+            f"{accession_no_dashes}/{accession}-index.html"
+        )
+
+        try:
+            soup = BeautifulSoup(self._sec_get(index_url).text, "lxml")
+        except httpx.HTTPError:
+            return []
+
+        docs: List[AssociatedDoc] = []
+        for row in soup.select("table.tableFile tr")[1:]:
+            cols = row.find_all("td")
+            if len(cols) < 5:
+                continue
+
+            doc_link = cols[2].find("a")
+            if not doc_link or not doc_link.get("href"):
+                continue
+
+            href = str(doc_link["href"])
+            name = href.rsplit("/", 1)[-1]
+            if name == primary_doc:
+                continue
+
+            size_text = cols[4].get_text(strip=True)
+            docs.append(
+                AssociatedDoc(
+                    name=name,
+                    description=cols[1].get_text(" ", strip=True),
+                    doc_type=cols[3].get_text(strip=True),
+                    size=int(size_text) if size_text.isdigit() else None,
+                    url=(
+                        href
+                        if href.startswith("http")
+                        else f"https://www.sec.gov{href}"
+                    ),
+                )
+            )
+
+        return docs
+
     def download_doc_text(
-            self,
-            ticker: str,
-            accession: str,
-            primary_doc: str,
+        self,
+        ticker: str,
+        accession: str,
+        primary_doc: str,
     ) -> str:
         cik = self.resolve_cik(ticker)
         url = (
@@ -74,14 +149,15 @@ class SECFilingsClient:
 
     @validate_call
     def get_filings(
-            self,
-            ticker: str,
-            *,
-            scope: Literal["recent", "all"] = "recent",
-            form: Annotated[
-                Optional[str], StringConstraints(strip_whitespace=True, to_upper=True)
-            ] = None,
-            limit: Optional[PositiveInt] = None,
+        self,
+        ticker: str,
+        *,
+        scope: Literal["recent", "all"] = "recent",
+        form: Annotated[
+            Optional[str], StringConstraints(strip_whitespace=True, to_upper=True)
+        ] = None,
+        limit: Optional[PositiveInt] = None,
+        include_associated_docs: bool = False,
     ) -> List[Filing]:
         """Fetch filings for a ticker.
 
@@ -91,6 +167,7 @@ class SECFilingsClient:
                 recent + older pages referenced in `filings.files`.
             form: Optional form filter (case-insensitive).
             limit: Optional maximum number of results to return.
+            include_associated_docs: Include non-primary documents for each filing.
 
         Returns:
             List of strongly-typed `Filing` models.
@@ -99,7 +176,8 @@ class SECFilingsClient:
 
         def pages():
             yield submissions["filings"]["recent"]
-            if scope == "recent": return
+            if scope == "recent":
+                return
             base = "https://data.sec.gov/submissions"
             yield from (
                 self._get_json(f"{base}/{name}")
@@ -108,23 +186,40 @@ class SECFilingsClient:
             )
 
         target_form = form.upper() if form else None
+        cik = self.resolve_cik(ticker) if include_associated_docs else None
+        filings: List[Filing] = []
 
-        rows = (
-            Filing(form=f, accession=a, filing_date=d, primary_doc=p)
-            for page in pages()
+        for page in pages():
             for f, a, d, p in zip(
-            page.get("form", ()),
-            page.get("accessionNumber", ()),
-            page.get("filingDate", ()),
-            page.get("primaryDocument", ()),
-        )
-            if not target_form or f.upper() == target_form
-        )
+                page.get("form", ()),
+                page.get("accessionNumber", ()),
+                page.get("filingDate", ()),
+                page.get("primaryDocument", ()),
+            ):
+                if target_form and f.upper() != target_form:
+                    continue
 
-        return list(islice(rows, limit)) if limit is not None else list(rows)
+                docs: tuple[AssociatedDoc, ...] = ()
+                if include_associated_docs and cik is not None:
+                    docs = tuple(self.associated_docs(cik, a, p))
+
+                filings.append(
+                    Filing(
+                        form=f,
+                        accession=a,
+                        filing_date=d,
+                        primary_doc=p,
+                        associated_docs=docs,
+                    )
+                )
+
+                if limit is not None and len(filings) >= limit:
+                    return filings
+
+        return filings
 
     def filings_count_by_form(
-            self, ticker: str, form: Optional[str] = None
+        self, ticker: str, form: Optional[str] = None
     ) -> Dict[str, int]:
         """Return counts grouped by form for a ticker (optionally filtered by form)."""
         filings = self.get_filings(ticker, scope="all", form=form)
@@ -136,6 +231,26 @@ class SECFilingsClient:
 
 
 _CLIENT = SECFilingsClient()
+
+def get_complete_filings(ticker: str, doc_type:Literal["8-K", "10-K"]) -> List[Filing]:
+    filings = _CLIENT.get_filings(ticker, scope="all", form=doc_type, include_associated_docs=True)
+    full_docs = []
+    for filing in filings:
+        for doc in filing.associated_docs:
+            if doc.description == "Complete submission text file":
+                full_docs.append(CompleteFiling(
+                    name=doc.name,
+                    description=doc.description,
+                    doc_type=doc.doc_type,
+                    size=doc.size,
+                    url=doc.url,
+                    form=filing.form,
+                    accession=filing.accession,
+                    filing_date=filing.filing_date,
+                    primary_doc=filing.primary_doc,
+                ))
+                break
+    return full_docs
 
 
 def main() -> int:
@@ -191,6 +306,7 @@ def main() -> int:
             scope="recent",
             form=args.filing_type,
             limit=args.limit,
+            include_associated_docs=True,
         )
         if not filings:
             msg = "Error: no recent filings found"
