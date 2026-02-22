@@ -1,8 +1,8 @@
 import argparse
 import json
 import os
-import sys
 import time
+import logging
 from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -19,6 +19,7 @@ from pydantic import (
 )
 
 SEC_DELAY = float(os.getenv("SEC_DELAY", "0.1"))  # keep this small but non-zero
+COMPLETE_SUBMISSION_DESCRIPTION = "Complete submission text file"
 
 
 class AssociatedDoc(BaseModel):
@@ -40,6 +41,7 @@ class Filing(BaseModel):
     primary_doc: str
     associated_docs: tuple[AssociatedDoc, ...] = ()
 
+
 class CompleteFiling(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -53,6 +55,15 @@ class CompleteFiling(BaseModel):
     accession: str
     filing_date: str
     primary_doc: str
+
+    @classmethod
+    def from_filing_and_doc(
+            cls,
+            filing: Filing,
+            doc: AssociatedDoc,
+    ) -> "CompleteFiling":
+        filing_data = filing.model_dump(exclude={"associated_docs"})
+        return cls.model_validate({**filing_data, **doc.model_dump()})
 
 
 class SECFilingsClient:
@@ -86,10 +97,10 @@ class SECFilingsClient:
         return self._get_json(f"https://data.sec.gov/submissions/CIK{cik}.json")
 
     def associated_docs(
-        self,
-        cik: int,
-        accession: str,
-        primary_doc: str,
+            self,
+            cik: int,
+            accession: str,
+            primary_doc: str,
     ) -> List[AssociatedDoc]:
         accession_no_dashes = accession.replace("-", "")
         index_url = (
@@ -135,10 +146,10 @@ class SECFilingsClient:
         return docs
 
     def download_doc_text(
-        self,
-        ticker: str,
-        accession: str,
-        primary_doc: str,
+            self,
+            ticker: str,
+            accession: str,
+            primary_doc: str,
     ) -> str:
         cik = self.resolve_cik(ticker)
         url = (
@@ -149,15 +160,15 @@ class SECFilingsClient:
 
     @validate_call
     def get_filings(
-        self,
-        ticker: str,
-        *,
-        scope: Literal["recent", "all"] = "recent",
-        form: Annotated[
-            Optional[str], StringConstraints(strip_whitespace=True, to_upper=True)
-        ] = None,
-        limit: Optional[PositiveInt] = None,
-        include_associated_docs: bool = False,
+            self,
+            ticker: str,
+            *,
+            scope: Literal["recent", "all"] = "recent",
+            form: Annotated[
+                Optional[str], StringConstraints(strip_whitespace=True, to_upper=True)
+            ] = None,
+            limit: Optional[PositiveInt] = None,
+            include_associated_docs: bool = False,
     ) -> List[Filing]:
         """Fetch filings for a ticker.
 
@@ -191,10 +202,10 @@ class SECFilingsClient:
 
         for page in pages():
             for f, a, d, p in zip(
-                page.get("form", ()),
-                page.get("accessionNumber", ()),
-                page.get("filingDate", ()),
-                page.get("primaryDocument", ()),
+                    page.get("form", ()),
+                    page.get("accessionNumber", ()),
+                    page.get("filingDate", ()),
+                    page.get("primaryDocument", ()),
             ):
                 if target_form and f.upper() != target_form:
                     continue
@@ -219,7 +230,7 @@ class SECFilingsClient:
         return filings
 
     def filings_count_by_form(
-        self, ticker: str, form: Optional[str] = None
+            self, ticker: str, form: Optional[str] = None
     ) -> Dict[str, int]:
         """Return counts grouped by form for a ticker (optionally filtered by form)."""
         filings = self.get_filings(ticker, scope="all", form=form)
@@ -232,25 +243,12 @@ class SECFilingsClient:
 
 _CLIENT = SECFilingsClient()
 
-def get_complete_filings(ticker: str, doc_type:Literal["8-K", "10-K"]) -> List[Filing]:
+
+def get_complete_filings(ticker: str, doc_type: Literal["8-K", "10-K"]) -> List[CompleteFiling]:
     filings = _CLIENT.get_filings(ticker, scope="all", form=doc_type, include_associated_docs=True)
-    full_docs = []
-    for filing in filings:
-        for doc in filing.associated_docs:
-            if doc.description == "Complete submission text file":
-                full_docs.append(CompleteFiling(
-                    name=doc.name,
-                    description=doc.description,
-                    doc_type=doc.doc_type,
-                    size=doc.size,
-                    url=doc.url,
-                    form=filing.form,
-                    accession=filing.accession,
-                    filing_date=filing.filing_date,
-                    primary_doc=filing.primary_doc,
-                ))
-                break
-    return full_docs
+    return [CompleteFiling.from_filing_and_doc(filing, doc) for filing in filings
+            if (doc := next((candidate for candidate in filing.associated_docs
+                             if candidate.description == COMPLETE_SUBMISSION_DESCRIPTION), None)) is not None]
 
 
 def main() -> int:
@@ -277,7 +275,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.limit < 1:
-        print("Error: --limit must be >= 1", file=sys.stderr)
+        logging.error("--limit must be >= 1")
         return 2
 
     try:
@@ -288,17 +286,14 @@ def main() -> int:
                 )
             except ValueError:
                 if args.filing_type:
-                    print(
-                        f"Error: no filings found for type {args.filing_type}",
-                        file=sys.stderr,
-                    )
+                    logging.error(f"No filings found for type {args.filing_type}")
                 else:
-                    print("Error: no filings found", file=sys.stderr)
+                    logging.error("No filings found")
                 return 1
 
-            print("Filing counts by type:")
-            print(json.dumps(counts_dict, indent=2))
-            print(f"Total filings: {sum(counts_dict.values())}")
+            logging.info("Filing counts by type:")
+            logging.info(json.dumps(counts_dict, indent=2))
+            logging.info(f"Total filings: {sum(counts_dict.values())}")
             return 0
 
         filings = _CLIENT.get_filings(
@@ -309,10 +304,10 @@ def main() -> int:
             include_associated_docs=True,
         )
         if not filings:
-            msg = "Error: no recent filings found"
+            msg = "No recent filings found"
             if args.filing_type:
-                msg = f"Error: no recent filings found for type {args.filing_type}"
-            print(msg, file=sys.stderr)
+                msg = f"No recent filings found for type {args.filing_type}"
+            logging.info(msg)
             return 1
 
         latest = filings[0]
@@ -322,7 +317,7 @@ def main() -> int:
             latest.primary_doc,
         )
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logging.error(f"{exc}")
         return 1
 
     latest_title = (
@@ -331,10 +326,10 @@ def main() -> int:
         f"accession={latest.accession}, primary_doc={latest.primary_doc}):"
     )
 
-    print("Filings:")
-    print(json.dumps([filing.model_dump() for filing in filings], indent=2))
-    print(latest_title)
-    print(latest_content)
+    logging.info("Filings:")
+    logging.info(json.dumps([filing.model_dump() for filing in filings], indent=2))
+    logging.info(latest_title)
+    logging.info(latest_content)
     return 0
 
 
