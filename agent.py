@@ -113,6 +113,7 @@ def topic_is_discussed(text_chunk: str, topic: str) -> tuple[TopicCheck, RunUsag
     return result.output, result.usage()
 
 
+encoder = tiktoken.get_encoding("cl100k_base")
 filings: list[CompleteFiling] = []
 
 # Ignore filings before 2022-01-01
@@ -126,7 +127,6 @@ for ticker in pbar:
     try:
         filings.extend(get_complete_filings(ticker=ticker, doc_type=FILING_TYPE, start_date=start_date))
     except Exception as exc:
-        LOGGER.error("Failed to fetch filings for %s: %s", ticker, exc)
         failed_tickers.append(ticker)
         continue
     pbar.set_postfix(collected_filings=len(filings), failed_tickers=len(failed_tickers))
@@ -190,7 +190,6 @@ def persist_result(result: FilingAnalysis) -> None:
         f.write("\n")
 
 
-encoder = tiktoken.get_encoding("cl100k_base")
 max_tokens = 4096
 
 split = False
