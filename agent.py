@@ -3,6 +3,7 @@ import os
 from typing import Literal, Optional
 
 import pandas as pd
+import tiktoken
 from dotenv import load_dotenv
 from llama_index.core import Document
 from llama_index.core.node_parser import SemanticSplitterNodeParser
@@ -116,9 +117,13 @@ def get_description(i: int, total: int, usage: Usage) -> str:
     return f"{i + 1}/{total} ({usage.input_tokens} input tokens, {usage.output_tokens} output tokens)"
 
 
+encoder = tiktoken.get_encoding("cl100k_base")
+max_tokens = 8191
+
 for filing in pbar:
-    doc = Document(text=get_filing_content(filing))
-    nodes = splitter.get_nodes_from_documents([doc])
+    tokens = encoder.encode(get_filing_content(filing))
+    docs = [Document(text=encoder.decode(tokens[i:i + max_tokens])) for i in range(0, len(tokens), max_tokens)]
+    nodes = splitter.get_nodes_from_documents(docs)
     for i, node in enumerate(nodes):
         pbar.set_description(get_description(i, len(nodes), overall_usage))
         check, usage = topic_is_discussed(node.text, "AI")
